@@ -102,17 +102,24 @@ def file_copy(src: Path, dest: Path, mkdirs: bool = True) -> bool:
 
 
 def file_link(target: Path, dest: Path, mkdirs: bool = True, relative: bool = False) -> bool:
-    rel_target = dest.parent / target
-    if not rel_target.exists():
+    actual_target = (dest.parent / target).resolve()
+    if not actual_target.exists():
         raise ValueError(f"link target {target!r} doesn't exist")
 
-    if dest.is_symlink() and dest.parent / dest.readlink() == target:
-        return False
+    if dest.is_symlink() or dest.exists():
+        try:
+            if dest.resolve() == actual_target:
+                return False  # symlink is correct
+        except Exception:
+            pass # handle broken symlinks gracefully
+        dest.unlink()
+
     if mkdirs and not dest.parent.is_dir():
         dest.parent.mkdir(parents=True)
 
     if relative and str(target)[0] == "/":
         target = target.relative_to(dest.parent)
+
     dest.symlink_to(target)
     return True
 
