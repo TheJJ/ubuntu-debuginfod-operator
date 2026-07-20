@@ -11,7 +11,7 @@ description: |
   GDB can fetch those in a debugging session, by requesting currently needed symbols from debuginfod.
 
 platforms:
-  ubuntu@24.04:amd64:
+  ubuntu@26.04:amd64:
 
 parts:
   ubuntu-debuginfod-charm:
