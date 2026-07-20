@@ -168,6 +168,7 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         self.unit.close_port("tcp", debuginfod_port)
         self.unit.open_port("tcp", ingress_port)
         self._update_ingress_status()
+        self._check_status()
 
     def _on_ingress_relation_joined(self, event: ops.RelationJoinedEvent):
         """Ensure relation data is published the moment a new relation is established."""

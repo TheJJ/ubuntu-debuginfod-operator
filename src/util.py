@@ -47,9 +47,9 @@ def file_ensure_content(
         if matcher is not None:
             if replace is None:
                 raise ValueError("when there's a matcher, you need to set replace.")
-            find = re.compile(matcher)
+            find = re.compile(matcher, re.MULTILINE)
 
-            if find.match(current_content):
+            if find.search(current_content):
                 missing = False
                 new_cfg = re.sub(find, replace, current_content, count=1)
 
