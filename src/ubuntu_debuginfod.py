@@ -95,7 +95,7 @@ class UbuntuDebuginfod:
                 with tempfile.TemporaryDirectory() as tmpdir:
                     # use version from 25.04/25.10
                     vine_update = "python3-vine_5.1.0+dfsg-1_all.deb"
-                    run_check(f"wget -P {tmpdir}/ http://archive.ubuntu.com/ubuntu/pool/main/v/vine/{vine_update}")
+                    run_check(f"wget -P {tmpdir}/ https://archive.ubuntu.com/ubuntu/pool/main/v/vine/{vine_update}")
                     run_check(f"apt install {tmpdir}/{vine_update}")
 
             # remove celery's "runtime" dependency for unused python3-tzdata

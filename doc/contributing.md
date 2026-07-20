@@ -33,11 +33,11 @@ charmcraft pack
 
 ## Style
 
-We use `ruff` for style checking, `mypy` for type checks.
+We use `ruff` for style checking, `ty` for type checks.
 
 ``` console
 # to run type checks
-uv run mypy ./src
+uv run ty check
 # code style linting
 uv run ruff check
 ```

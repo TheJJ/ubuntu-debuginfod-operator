@@ -32,13 +32,14 @@ dev = [
 minversion = "6.0"
 log_cli_level = "INFO"
 pythonpath = [
-    "src"
+    "src",
+    "lib"
 ]
 
 # Linting tools configuration
 [tool.ruff]
 line-length = 120
-extend-exclude = ["__pycache__", "*.egg_info"]
+extend-exclude = ["__pycache__", "*.egg_info", "lib"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "C", "N", "PL", "RUF", "I001"]
@@ -48,3 +49,8 @@ pylint.max-args = 10
 
 [tool.codespell]
 skip = "build,lib,venv,icon.svg,.tox,.git,.mypy_cache,.ruff_cache,.coverage"
+
+# Type checking tool configuration
+[tool.ty.environment]
+extra-paths = ["lib"]
+
