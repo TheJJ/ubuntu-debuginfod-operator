@@ -160,8 +160,8 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         # Refresh ingress requirements immediately when config changes.
         ingress_port = self._setup_ingress(cfg)
 
-        self._ubuntu_debuginfod.configure(cfg)
-        self._debuginfod.configure(cfg)
+        self._ubuntu_debuginfod.configure(self.unit, cfg)
+        self._debuginfod.configure(self.unit, cfg)
 
         # Open exactly one externally exposed port based on mode.
         self.unit.close_port("tcp", 80)

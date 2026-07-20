@@ -49,7 +49,7 @@ class Debuginfod:
 
         unit.status = ops.ActiveStatus("Ready")
 
-    def configure(self, config: Config) -> None:
+    def configure(self, unit: Unit, config: Config) -> None:
         pass
 
     def restart(self, config: Config) -> None:

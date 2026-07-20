@@ -122,10 +122,11 @@ class UbuntuDebuginfod:
 
         unit.status = ops.ActiveStatus("Ready")
 
-    def configure(self, config: Config) -> None:
+    def configure(self, unit: Unit, config: Config) -> None:
         """
         ubuntu-debuginfod setup configuration.
         """
+        changed = False
 
         # Deploy the launchpad access credentials secret file.
         lp_creds_secret = config.lp_credentials
@@ -135,10 +136,12 @@ class UbuntuDebuginfod:
             try:
                 secrets = lp_creds_secret.get_content(refresh=True)
                 lp_creds = secrets["cred"]  # secret key name as set in `juju add-secret`
-                file_ensure_content(self.root_path / "home/mirror/.config/ubuntu-debuginfod/lp.cred",
-                                    content=lp_creds,
-                                    mkdir=True,
-                                    owner="mirror")
+                changed |= file_ensure_content(
+                    self.root_path / "home/mirror/.config/ubuntu-debuginfod/lp.cred",
+                    content=lp_creds,
+                    mkdir=True,
+                    owner="mirror",
+                )
 
             except ops.SecretNotFoundError:
                 logger.info("launchpad secret not set yet.")
@@ -153,10 +156,23 @@ ppa:ubuntu-esm/esm-apps-security
 ppa:ubuntu-esm/esm-apps-updates
 ppa:ubuntu-advantage/realtime-updates
 """
-        file_ensure_content(self.root_path / "home/mirror/.config/ubuntu-debuginfod/ppalist-private",
-                            content=custom_private_ppas,
-                            mkdir=True,
-                            owner="mirror")
+        changed |= file_ensure_content(
+            self.root_path / "home/mirror/.config/ubuntu-debuginfod/ppalist-private",
+            content=custom_private_ppas,
+            mkdir=True,
+            owner="mirror",
+        )
+
+        poller_enabled = 0 == run_ret("systemctl is-enabled ubuntu-debuginfod-launchpad-poller.timer")
+        if poller_enabled != config.update_ddeb:
+            changed = True
+
+        if not changed:
+            return
+
+        self.restart(unit, config)
+        if not config.update_ddeb and poller_enabled:
+            run_check("systemctl disable --now ubuntu-debuginfod-launchpad-poller.timer")
 
     def restart(self, unit: Unit, config: Config) -> None:
         if config.testmode:
