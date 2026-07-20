@@ -100,6 +100,11 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         # triggers when the ingress url changes
         framework.observe(self._ingress.on.ready, self._on_ingress_ready)
         framework.observe(self._ingress.on.revoked, self._on_ingress_revoked)
+        # triggers when the ingress is joined
+        framework.observe(
+            self.on["debuginfod-http-ingress"].relation_joined,
+            self._on_ingress_relation_joined
+        )
 
         self._ubuntu_debuginfod = UbuntuDebuginfod(self._root)
         self._debuginfod = Debuginfod(self._root)
@@ -148,14 +153,12 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             return
         logger.info("charm config changed...")
 
-        # ingress is initialized in __init__ from current config.
-        ingress_port = 80 if cfg.use_reverse_proxy else debuginfod_port
-
         # Configure nginx if reverse proxy is enabled
         self._configure_nginx(cfg.use_reverse_proxy)
 
+        # Ingress is initialized in __init__ from current config.
         # Refresh ingress requirements immediately when config changes.
-        self._ingress.provide_ingress_requirements(port=ingress_port)
+        ingress_port = self._setup_ingress(cfg)
 
         self._ubuntu_debuginfod.configure(cfg)
         self._debuginfod.configure(cfg)
@@ -165,6 +168,11 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         self.unit.close_port("tcp", debuginfod_port)
         self.unit.open_port("tcp", ingress_port)
         self._update_ingress_status()
+
+    def _on_ingress_relation_joined(self, event: ops.RelationJoinedEvent):
+        """Ensure relation data is published the moment a new relation is established."""
+        cfg = self._load_cfg()
+        self._setup_ingress(cfg)
 
     def _on_ingress_ready(self, event: ops.RelationEvent):
         """Handle ingress becoming ready."""
@@ -224,6 +232,12 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         if changed:
             logger.info("nginx config changed, restarting...")
             run_check("systemctl restart nginx")
+
+    def _setup_ingress(self, cfg: config.Config) -> int:
+        logger.info("setting up ingress relation parameters...")
+        ingress_port = 80 if cfg.use_reverse_proxy else debuginfod_port
+        self._ingress.provide_ingress_requirements(port=ingress_port)
+        return ingress_port
 
     def _start(self) -> None:
         cfg = self._load_cfg()
