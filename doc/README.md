@@ -22,7 +22,7 @@ To allow Launchpad interaction, you need to set the `lp_credentials` option to a
 You can do this the following way:
 
 ``` console
-runuser -u mirror -- /usr/share/ubuntu-debuginfod/utils/obtain-launchpad-credentials.py /tmp/lp.cred
+runuser -u mirror -- ubuntu-debuginfod login /tmp/lp.cred
 juju add-secret debuginfod-launchpad cred#file=/tmp/lp.cred
 juju grant-secret debuginfod-launchpad $your_application
 juju secrets  # get the secret id

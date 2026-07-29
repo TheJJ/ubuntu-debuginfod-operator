@@ -81,7 +81,7 @@ config:
       description: |
         launchpad secret as the contents of a lp.cred file.
         obtain with:
-          runuser -u mirror -- /usr/share/ubuntu-debuginfod/utils/obtain-launchpad-credentials.py /tmp/lp.cred
+          runuser -u mirror -- ubuntu-debuginfod login /tmp/lp.cred
 
         store it in juju (you'll get the secret_id):
           juju add-secret debuginfod-launchpad cred#file=/tmp/lp.cred
