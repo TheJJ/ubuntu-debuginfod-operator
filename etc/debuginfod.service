@@ -6,7 +6,7 @@ After=network.target network-online.target nss-lookup.target
 Type=simple
 EnvironmentFile=/etc/default/debuginfod
 Environment=TMPDIR=/srv/debug-mirror/tmpdir/
-ExecStart=/usr/bin/debuginfod -d /var/cache/debuginfod/debuginfod.sqlite -p $DEBUGINFOD_PORT $DEBUGINFOD_OPTIONS $DEBUGINFOD_VERBOSE $DEBUGINFOD_PRAGMAS /srv/debug-mirror/ddebs/ /srv/debug-mirror/private-ppas/ /srv/debug-mirror/ubuntu-archive-dbg/
+ExecStart=/usr/bin/debuginfod -d /var/cache/debuginfod/debuginfod.sqlite -p $DEBUGINFOD_PORT $DEBUGINFOD_OPTIONS $DEBUGINFOD_VERBOSE $DEBUGINFOD_PRAGMAS /srv/debug-mirror/ddebs/ /srv/debug-mirror/ppas/ /srv/debug-mirror/private-ppas/ /srv/debug-mirror/ubuntu-archive-dbg/
 Restart=on-failure
 DynamicUser=yes
 PrivateDevices=true
@@ -17,7 +17,7 @@ ProtectKernelLogs=true
 ProtectKernelModules=true
 MemoryDenyWriteExecute=true
 RestrictRealtime=true
-ReadOnlyPaths=/srv/debug-mirror/ddebs/ /srv/debug-mirror/private-ppas/ /srv/debug-mirror/ubuntu-archive-dbg/
+ReadOnlyPaths=/srv/debug-mirror/ddebs/ /srv/debug-mirror/ppas/ /srv/debug-mirror/private-ppas/ /srv/debug-mirror/ubuntu-archive-dbg/
 ReadWritePaths=/srv/debug-mirror/tmpdir/
 CacheDirectory=debuginfod
 #TemporaryFileSystem=/var/tmp/:size=25%:nostrictatime

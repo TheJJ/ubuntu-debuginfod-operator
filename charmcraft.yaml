@@ -33,6 +33,16 @@ parts:
       - README.md
       - etc/
 
+resources:
+  ubuntu-debuginfod-deb:
+    type: file
+    filename: ubuntu-debuginfod.deb
+    description: "optional locally built ubuntu-debuginfod binary package for testing"
+  python3-ubuntu-debuginfod-deb:
+    type: file
+    filename: python3-ubuntu-debuginfod.deb
+    description: "optional locally built python3-ubuntu-debuginfod binary package for testing"
+
 storage:
   # where all the debug symbols are stored. ~13 TiB (at 25.04)
   debugsyms:
@@ -68,6 +78,14 @@ config:
       type: boolean
       description: "perform periodic debug data updates by polling launchpad"
       default: false
+    downloader_workers:
+      type: int
+      description: "number of parallel Launchpad downloader workers to run on each unit"
+      default: 1
+    package_source:
+      type: string
+      description: "install ubuntu-debuginfod from the production PPA or supplied deb resources (ppa or resource)"
+      default: "ppa"
     testmode:
       type: boolean
       description: "operate in test mode (e.g. juju integration test), so we don't process the whole archive."

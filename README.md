@@ -14,8 +14,13 @@ When the [Charm](https://juju.is/charms-architecture) is installed, it:
 - installs [`ubuntu-debuginfod`](https://launchpad.net/ubuntu-debuginfod)
 - installs and sets up `systemd` services
   - `debuginfod.service`: provides files to debuggers via http (port 8002 default)
-  - `ubuntu-debuginfod-launchpad-poller.service` & `.timer`: asks launchpad about new packages
-  - `ubuntu-debuginfod-celery.service`: processes jobs and downloads debug symbols from archive
+  - `ubuntu-debuginfod-launchpad-poller.service`: asks Launchpad about new packages
+  - `ubuntu-debuginfod-launchpad-downloader@.service`: runs configurable parallel download workers
+  - `ubuntu-debuginfod-launchpad-cleaner.timer`: periodically removes stale artifacts
+- installs PostgreSQL locally and provisions the `ubuntu-debuginfod` database for the `mirror` login role
+- writes PPA configuration to `/home/mirror/.config/ubuntu-debuginfod/config.toml`
+
+Set `downloader_workers` to the number of parallel download workers to run on each unit (default: `1`).
 
 ## Other resources
 

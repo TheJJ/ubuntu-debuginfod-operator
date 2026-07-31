@@ -52,6 +52,10 @@ basedir = Path(__file__).parent.parent
 
 # tcp port where debuginfod listens. set in etc/default-debuginfod
 debuginfod_port = 8002
+package_resource_names = (
+    "ubuntu-debuginfod-deb",
+    "python3-ubuntu-debuginfod-deb",
+)
 
 
 class UbuntuDebuginfodCharm(ops.CharmBase):
@@ -93,6 +97,7 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         framework.observe(self.on.start, self._on_start)
         framework.observe(self.on.stop, self._on_stop)
         framework.observe(self.on.update_status, self._on_update_status)
+        framework.observe(self.on.secret_changed, self._on_secret_changed)
         framework.observe(self.on.debugsyms_storage_attached, self._on_debugsyms_storage_attached)
         framework.observe(self.on.debuginfoddb_storage_attached,
                           self._on_debuginfoddb_storage_attached)
@@ -137,10 +142,12 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         self._debuginfod.storage_meta_attached(self.unit)
 
     def _on_install(self, event: ops.InstallEvent):
-        self._install()
+        self._install(self._load_cfg())
 
     def _on_upgrade(self, event: ops.UpgradeCharmEvent):
-        self._install()
+        cfg = self._load_cfg()
+        self._install(cfg)
+        self._configure(cfg)
         # not sure: according to https://github.com/canonical/charm-events
         # start is issued after upgrade
         # but in my test start wasn't issued after upgrade.
@@ -152,6 +159,11 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             logger.info("charm config is empty.")
             return
         logger.info("charm config changed...")
+
+        self._configure(cfg)
+
+    def _configure(self, cfg: config.Config) -> None:
+        """Apply charm and service configuration."""
 
         # Configure nginx if reverse proxy is enabled
         self._configure_nginx(cfg.use_reverse_proxy)
@@ -199,14 +211,28 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
     def _on_update_status(self, event: ops.UpdateStatusEvent):
         self._check_status()
 
-    def _install(self):
+    def _on_secret_changed(self, event: ops.SecretChangedEvent):
+        cfg = self._load_cfg()
+        if cfg.lp_credentials is None or cfg.lp_credentials.id != event.secret.id:
+            return
+        self._configure(cfg)
+        self._check_status()
+
+    def _install(self, cfg: config.Config):
         logger.info("installing charm...")
         # ensure automatic system security upgrades
         run_check("apt install -y needrestart unattended-upgrades")
         run_check("dpkg-reconfigure unattended-upgrades")
 
         # nginx will be installed/configured if needed by _configure_nginx() in config-changed
-        self._ubuntu_debuginfod.install(self.unit)
+        package_resources = None
+        if cfg.package_source == "resource":
+            package_resources = tuple(
+                self.model.resources.fetch(resource_name)
+                for resource_name in package_resource_names
+            )
+
+        self._ubuntu_debuginfod.install(self.unit, package_resources)
         self._debuginfod.install(self.unit)
 
     def _configure_nginx(self, use_reverse_proxy: bool):
@@ -261,7 +287,7 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         cfg = self._load_cfg()
 
         # check if launchpad processing is running
-        if not cfg.testmode and not self._ubuntu_debuginfod.is_running():
+        if not cfg.testmode and not self._ubuntu_debuginfod.is_running(cfg):
             self.unit.status = ops.BlockedStatus("ubuntu-debuginfod not running")
             return
 

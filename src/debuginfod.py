@@ -41,11 +41,13 @@ class Debuginfod:
 
         unit.status = ops.MaintenanceStatus("Setting up debuginfod...")
 
-        file_copy(
+        changed = file_copy(
             basedir / "etc/debuginfod.service",
             self.root_path / "etc/systemd/system/debuginfod.service",
         )
-        file_copy(basedir / "etc/default-debuginfod", self.root_path / "etc/default/debuginfod")
+        changed |= file_copy(basedir / "etc/default-debuginfod", self.root_path / "etc/default/debuginfod")
+        if changed:
+            run_check("systemctl daemon-reload")
 
         unit.status = ops.ActiveStatus("Ready")
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import ops
 import pydantic
 
@@ -14,6 +16,12 @@ class Config(pydantic.BaseModel):
 
     # activate ddeb fetching
     update_ddeb: bool = pydantic.Field()
+
+    # parallel downloader processes on this unit
+    downloader_workers: int = pydantic.Field(default=1, ge=1)
+
+    # package installation source
+    package_source: Literal["ppa", "resource"] = pydantic.Field(default="ppa")
 
     # run in testmode
     testmode: bool = pydantic.Field()

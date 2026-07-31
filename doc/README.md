@@ -13,6 +13,18 @@ The ubuntu-debuginfod-operator is designed the following way:
 
 ![ubuntu-debuginfod-operator architecture](ubuntu-debuginfod.svg)
 
+```mermaid
+flowchart LR
+	launchpad[Launchpad] --> poller[launchpad poller]
+	poller --> database[(PostgreSQL job queue)]
+	database --> downloader[download worker]
+	downloader --> mirror[(debug mirror storage)]
+	cleaner[cleaner timer] --> database
+	cleaner --> mirror
+	mirror --> debuginfod[debuginfod HTTP service]
+	debugger[Debugger] --> debuginfod
+```
+
 ## Getting started
 
 Deploy the ubuntu-debuginfod server using `juju deploy ubuntu-debuginfod`.
@@ -29,7 +41,12 @@ juju secrets  # get the secret id
 juju config $your_application lp_credentials=secret:$secret_id"
 ```
 
-To activate the archive synchronization, set option `update_ddeb=True`.
+The charm installs PostgreSQL on the unit, creates the `mirror` login role and `ubuntu-debuginfod` database, and applies schema migrations before starting workers.
+It stores PPA configuration in `/home/mirror/.config/ubuntu-debuginfod/config.toml`; the default database URL is intentionally omitted so PostgreSQL peer authentication uses the local socket.
+Set `downloader_workers` to control how many parallel download workers run on the unit; it defaults to `1`.
+Worker counts are currently configured independently per unit rather than coordinated across an application.
+
+To activate the archive synchronization, set option `update_ddeb=true`.
 
 ## Contributing
 

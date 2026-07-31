@@ -7,14 +7,12 @@ import os
 import pwd
 import shlex
 import shutil
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import ops
 
-from util import file_ensure_content, run_check, run_out, run_ret
+from util import file_ensure_content, file_remove, run_check, run_out, run_ret
 
 if TYPE_CHECKING:
     from ops.model import Unit
@@ -25,9 +23,43 @@ if TYPE_CHECKING:
 basedir = Path(__file__).parent.parent
 logger = logging.getLogger(__name__)
 
+UBUNTU_DEBUGINFOD_CONFIG = """[settings]
+mirror_dir = "/srv/debug-mirror"
+
+[[ppas]]
+user = "ubuntu-esm"
+name = "esm-infra-security"
+private = true
+
+[[ppas]]
+user = "ubuntu-esm"
+name = "esm-infra-updates"
+private = true
+
+[[ppas]]
+user = "ubuntu-esm"
+name = "esm-apps-security"
+private = true
+
+[[ppas]]
+user = "ubuntu-esm"
+name = "esm-apps-updates"
+private = true
+
+[[ppas]]
+user = "ubuntu-advantage"
+name = "realtime-updates"
+private = true
+"""
+
+DOWNLOADER_SERVICE = "ubuntu-debuginfod-launchpad-downloader.service"
+DOWNLOADER_SERVICE_TEMPLATE = "ubuntu-debuginfod-launchpad-downloader@{worker}.service"
+DOWNLOADER_SERVICE_PREFIX = "ubuntu-debuginfod-launchpad-downloader@"
+
 
 class UbuntuDebuginfod:
     """Service for ubuntu-debuginfod."""
+
     def __init__(self, root_path: Path) -> None:
         self.root_path = root_path
 
@@ -35,6 +67,7 @@ class UbuntuDebuginfod:
         """Make sure directories exist for debug symbol storage in /srv/debug-mirror."""
         storage_dirs = (
             "srv/debug-mirror/ddebs/",
+            "srv/debug-mirror/ppas/",
             "srv/debug-mirror/private-ppas/",
             "srv/debug-mirror/ubuntu-archive-dbg/",
             "srv/debug-mirror/tmpdir/",
@@ -58,67 +91,66 @@ class UbuntuDebuginfod:
     def storage_attached(self, unit: Unit) -> None:
         self._ensure_storage_layout(unit)
 
-    def install(self, unit: Unit) -> None:
-        unit.status = ops.MaintenanceStatus("Installing ubuntu-debuginfod repo...")
+    def _ensure_database(self) -> None:
+        role_can_login = run_out(
+            "runuser -u postgres -- psql -tAc \"select rolcanlogin from pg_roles where rolname = 'mirror'\" postgres"
+        ).strip()
+        if not role_can_login:
+            run_check("runuser -u postgres -- createuser --login mirror")
+        elif role_can_login != "t":
+            run_check(
+                "runuser -u postgres -- psql -v ON_ERROR_STOP=1 -c \"alter role mirror login\" postgres"
+            )
 
-        run_check("add-apt-repository -y ppa:ubuntu-debuginfod-devs/ubuntu-debuginfod")
+        database_exists = run_out(
+            "runuser -u postgres -- psql -tAc "
+            "\"select 1 from pg_database where datname = 'ubuntu-debuginfod'\" postgres"
+        ).strip()
+        if not database_exists:
+            run_check("runuser -u postgres -- createdb --owner mirror ubuntu-debuginfod")
+
+    @staticmethod
+    def _downloader_services(config: Config) -> set[str]:
+        return {
+            DOWNLOADER_SERVICE_TEMPLATE.format(worker=worker)
+            for worker in range(1, config.downloader_workers + 1)
+        }
+
+    @staticmethod
+    def _enabled_downloader_services() -> set[str]:
+        output = run_out("systemctl show multi-user.target --property=Wants --value")
+        return {
+            service
+            for service in output.split()
+            if service.startswith(DOWNLOADER_SERVICE_PREFIX) and service.endswith(".service")
+        }
+
+    def _stop_downloader_services(self, config: Config) -> None:
+        services = self._enabled_downloader_services() | self._downloader_services(config)
+        for service in sorted(services):
+            run_ret(f"systemctl disable --now {service}")
+        run_ret(f"systemctl disable --now {DOWNLOADER_SERVICE}")
+
+    def install(self, unit: Unit, package_resources: tuple[Path, ...] | None = None) -> None:
+        if package_resources is None:
+            unit.status = ops.MaintenanceStatus("Installing ubuntu-debuginfod repo...")
+            run_check("add-apt-repository -y ppa:ubuntu-debuginfod-devs/ubuntu-debuginfod")
+
+        unit.status = ops.MaintenanceStatus("Installing PostgreSQL...")
+        run_check("apt install -y postgresql")
+        run_check("systemctl enable --now postgresql.service")
 
         unit.status = ops.MaintenanceStatus("Installing ubuntu-debuginfod...")
-        # the postinst script does all the user & db setup
         # no recommends, since we don't need toolchain/build-essentials (actually just dpkg-source)
-        run_check("apt install -y --no-install-recommends ubuntu-debuginfod")
+        packages = [str(path) for path in package_resources] if package_resources else ["ubuntu-debuginfod"]
+        run_check(shlex.join(["apt", "install", "-y", "--no-install-recommends", *packages]))
         # this creates the mirror:mirror user.
         # this also installs configs for:
-        # /etc/default/ubuntu-debuginfod-celery
+        # /etc/default/ubuntu-debuginfod-launchpad-downloader
         # /etc/default/ubuntu-debuginfod-launchpad-poller
 
         self._ensure_storage_layout(unit)
-
-        # set rabbitmq: consumer_timeout = 10800000
-        # because ubuntu-debuginfod/README says so.
-        rabbit_cfg_path = self.root_path / "etc/rabbitmq/rabbitmq.conf"
-        file_ensure_content(rabbit_cfg_path,
-                            matcher=r"^(\s*consumer_timeout)\s*=(.*?)$",
-                            replace=r"\g<1> = 10800000",
-                            content="\nconsumer_timeout = 10800000\n")
-
-        run_check("systemctl restart rabbitmq-server.service")
-
-        # noble has vine 5.0.0 only (and dpkg-depends say so),
-        # but celery 5.3.6-1 actually depends (by internal python wheel version check) on vine <6.0,>=5.1.0
-        # hack around by installing the newer version...
-        celery_version = run_out("dpkg-query --showformat='${Version}' --show python3-celery")
-        if run_ret(f"dpkg --compare-versions {shlex.quote(celery_version)} le 5.3.6-1") == 0:
-            vine_version = run_out("dpkg-query --showformat='${Version}' --show python3-vine")
-            # check vine satisfies celery
-            if run_ret(f"dpkg --compare-versions {shlex.quote(vine_version)} lt 5.1.0") == 0:
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    # use version from 25.04/25.10
-                    vine_update = "python3-vine_5.1.0+dfsg-1_all.deb"
-                    run_check(f"wget -P {tmpdir}/ https://archive.ubuntu.com/ubuntu/pool/main/v/vine/{vine_update}")
-                    run_check(f"apt install {tmpdir}/{vine_update}")
-
-            # remove celery's "runtime" dependency for unused python3-tzdata
-            # (which isn't in the archive anyway) to prevent another buggy startup crash.
-            celery_py_version = run_out("python3 -c 'import celery; print(celery.__version__)'").strip()
-            celery_patch_data = f"""
---- a/usr/lib/python3/dist-packages/celery-{celery_py_version}.dist-info/METADATA
-+++ b/usr/lib/python3/dist-packages/celery-{celery_py_version}.dist-info/METADATA
-@@ -37,7 +37,6 @@
- Requires-Dist: click <9.0,>=8.1.2
- Requires-Dist: kombu <6.0,>=5.3.4
- Requires-Dist: python-dateutil >=2.8.2
--Requires-Dist: tzdata >=2022.7
- Requires-Dist: vine <6.0,>=5.1.0
- Requires-Dist: importlib-metadata >=3.6 ; python_version < "3.8"
- Requires-Dist: backports.zoneinfo >=0.2.1 ; python_version < "3.9"
-""".encode()
-            ret = subprocess.run(["patch", "-d/", "-N", "-p1", "-r-"],
-                                 capture_output=True, input=celery_patch_data, check=False)
-            if ret.returncode != 0:
-                # thank you "patch" for not providing a return code to detect already-applied patches.
-                if b"previously applied" not in ret.stdout:
-                    raise Exception("couldn't apply celery's tzdata removal patch")
+        self._ensure_database()
 
         unit.status = ops.ActiveStatus("Ready")
 
@@ -129,64 +161,67 @@ class UbuntuDebuginfod:
         changed = False
 
         # Deploy the launchpad access credentials secret file.
+        lp_creds_path = self.root_path / "home/mirror/.config/ubuntu-debuginfod/lp.cred"
         lp_creds_secret = config.lp_credentials
         if lp_creds_secret is None:
             logger.info("launchpad secret configuration not given.")
+            changed |= file_remove(lp_creds_path)
         else:
             try:
                 secrets = lp_creds_secret.get_content(refresh=True)
                 lp_creds = secrets["cred"]  # secret key name as set in `juju add-secret`
                 changed |= file_ensure_content(
-                    self.root_path / "home/mirror/.config/ubuntu-debuginfod/lp.cred",
+                    lp_creds_path,
                     content=lp_creds,
                     mkdir=True,
                     owner="mirror",
+                    mode=0o600,
                 )
 
             except ops.SecretNotFoundError:
                 logger.info("launchpad secret not set yet.")
 
-        # set up custom PPAs to fetch
-        # if we do anonymous login with ubuntu-debuginfod,
-        # it looks in /home/mirror/.config/ubuntu-debuginfod/ppalist instead
-        custom_private_ppas="""# private ppas to fetch debug symbols from
-ppa:ubuntu-esm/esm-infra-security
-ppa:ubuntu-esm/esm-infra-updates
-ppa:ubuntu-esm/esm-apps-security
-ppa:ubuntu-esm/esm-apps-updates
-ppa:ubuntu-advantage/realtime-updates
-"""
         changed |= file_ensure_content(
-            self.root_path / "home/mirror/.config/ubuntu-debuginfod/ppalist-private",
-            content=custom_private_ppas,
+            self.root_path / "home/mirror/.config/ubuntu-debuginfod/config.toml",
+            content=UBUNTU_DEBUGINFOD_CONFIG,
             mkdir=True,
             owner="mirror",
         )
 
-        poller_enabled = 0 == run_ret("systemctl is-enabled ubuntu-debuginfod-launchpad-poller.timer")
-        if poller_enabled != config.update_ddeb:
-            changed = True
+        if config.testmode:
+            self.stop(unit, config)
+            return
 
-        if not changed:
+        poller_enabled = 0 == run_ret("systemctl is-enabled ubuntu-debuginfod-launchpad-poller.service")
+        services_running = self.is_running(config)
+        if not changed and poller_enabled == config.update_ddeb and services_running:
             return
 
         self.restart(unit, config)
         if not config.update_ddeb and poller_enabled:
-            run_check("systemctl disable --now ubuntu-debuginfod-launchpad-poller.timer")
+            run_check("systemctl disable --now ubuntu-debuginfod-launchpad-poller.service")
 
     def restart(self, unit: Unit, config: Config) -> None:
+        run_check(
+            "runuser -u mirror -- /usr/bin/python3 -I -m ubuntu_debuginfod.cli "
+            "--config /home/mirror/.config/ubuntu-debuginfod/config.toml db migrate"
+        )
+
         if config.testmode:
             # if testing, don't actually download stuff from launchpad
             # TODO: import just one package for testing.
             return
 
-        # ubuntu-debuginfod-celery: launches downloaders for new debug symbols
-        # tasks are generated by by poller
-        # needs launchpad creds, which are not given in test mode.
-        run_check("systemctl enable ubuntu-debuginfod-celery.service")
-        run_check("systemctl restart ubuntu-debuginfod-celery.service")
+        # The downloader processes jobs produced by the poller.
+        desired_downloaders = self._downloader_services(config)
+        for service in sorted(self._enabled_downloader_services() - desired_downloaders):
+            run_check(f"systemctl disable --now {service}")
+        run_check(f"systemctl disable --now {DOWNLOADER_SERVICE}")
+        for service in sorted(desired_downloaders):
+            run_check(f"systemctl enable {service}")
+            run_check(f"systemctl restart {service}")
 
-        # needs ubuntu-debuginfod-celery.service
+        run_check("systemctl enable ubuntu-debuginfod-launchpad-cleaner.timer")
         run_check("systemctl restart ubuntu-debuginfod-launchpad-cleaner.timer")
         run_check("systemctl restart ubuntu-debuginfod-launchpad-cleaner.service")
 
@@ -194,19 +229,24 @@ ppa:ubuntu-advantage/realtime-updates
             # no updating of debug files, but we do process the pending queue.
             return
 
-        # ubuntu-debuginfod-launchpad-poller: asks launchpad for updates
-        #   this is services/launchpad-poller.py
-        run_check("systemctl enable ubuntu-debuginfod-launchpad-poller.timer")
-        run_check("systemctl restart ubuntu-debuginfod-launchpad-poller.timer")
-        # initial polling
+        # The poller continuously asks Launchpad for updates.
+        run_check("systemctl enable ubuntu-debuginfod-launchpad-poller.service")
         run_check("systemctl restart ubuntu-debuginfod-launchpad-poller.service")
 
     def stop(self, unit: Unit, config: Config) -> None:
-        run_check("systemctl disable --now ubuntu-debuginfod-launchpad-poller.timer")
-        run_check("systemctl disable --now ubuntu-debuginfod-launchpad-cleaner.timer")
-        run_check("systemctl disable --now ubuntu-debuginfod-celery.service")
-        run_check("systemctl disable --now ubuntu-debuginfod-launchpad-poller.service")
-        run_check("systemctl disable --now ubuntu-debuginfod-launchpad-cleaner.service")
+        run_ret("systemctl disable --now ubuntu-debuginfod-launchpad-poller.service")
+        run_ret("systemctl disable --now ubuntu-debuginfod-launchpad-cleaner.timer")
+        self._stop_downloader_services(config)
+        run_ret("systemctl disable --now ubuntu-debuginfod-launchpad-cleaner.service")
 
-    def is_running(self) -> bool:
-        return 0 == run_ret("systemctl is-active ubuntu-debuginfod-celery.service")
+    def is_running(self, config: Config) -> bool:
+        desired_downloaders = self._downloader_services(config)
+        if self._enabled_downloader_services() != desired_downloaders:
+            return False
+        if any(run_ret(f"systemctl is-active {service}") != 0 for service in desired_downloaders):
+            return False
+        if run_ret("systemctl is-active ubuntu-debuginfod-launchpad-cleaner.timer") != 0:
+            return False
+        return not config.update_ddeb or run_ret(
+            "systemctl is-active ubuntu-debuginfod-launchpad-poller.service"
+        ) == 0

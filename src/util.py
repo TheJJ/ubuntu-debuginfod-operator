@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -17,9 +18,13 @@ def run_ret(cmd: str) -> int:
     """Execute a shell command and get its returncode."""
     return subprocess.run(shlex.split(cmd), check=False).returncode
 
-def run_out(cmd: str) -> str:
+def run_out(cmd: str, check: bool = True) -> str:
     """Execute a shell command and get its output."""
-    return subprocess.check_output(shlex.split(cmd)).decode()
+    return subprocess.run(
+        shlex.split(cmd),
+        check=check,
+        stdout=subprocess.PIPE,
+    ).stdout.decode()
 
 def file_ensure_content(
     file_path: Path,
@@ -29,6 +34,7 @@ def file_ensure_content(
     mkdir: bool = True,
     append_missing: bool = True,
     owner: str | None = None,
+    mode: int | None = None,
 ) -> bool:
     """For the given path, ensure content is present by replacing or adding.
 
@@ -82,6 +88,10 @@ def file_ensure_content(
         if file_path.owner() != owner:
             shutil.chown(file_path, owner)
             changed = True
+
+    if mode is not None and stat.S_IMODE(file_path.stat().st_mode) != mode:
+        file_path.chmod(mode)
+        changed = True
 
     return changed
 
