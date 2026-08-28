@@ -94,6 +94,15 @@ config:
       type: boolean
       description: "use nginx reverse proxy on port 80 in front of debuginfod (port 8002). When false, debuginfod is directly exposed."
       default: false
+    proxy:
+      type: string
+      description: |
+        http(s) proxy URL for the services' outbound connections (e.g. to Launchpad),
+        written as a systemd drop-in for the managed units. Deployment environments
+        without direct egress need this.
+        Empty (default) falls back to the model's juju-http(s)-proxy settings.
+        Set to "none" to force no proxy.
+      default: ""
     lp_credentials:
       type: secret
       description: |

@@ -59,6 +59,18 @@ juju refresh ubuntu-debuginfod \
 	--force
 ```
 
+To update only the packages on an existing deployment without touching the charm revision, attach new resource revisions and switch the package source:
+
+``` console
+juju attach-resource ubuntu-debuginfod ubuntu-debuginfod-deb=/path/to/ubuntu-debuginfod_VERSION_all.deb
+juju attach-resource ubuntu-debuginfod python3-ubuntu-debuginfod-deb=/path/to/python3-ubuntu-debuginfod_VERSION_all.deb
+juju config ubuntu-debuginfod package_source=resource
+```
+
+Note: changing `package_source` on an existing unit only affects the next install or upgrade hook;
+`config-changed` alone does not reinstall the packages.
+Use `juju refresh` as above to force reinstallation.
+
 With the default `package_source=ppa`, neither resource is fetched and the charm installs the production PPA package.
 
 ## Style

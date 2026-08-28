@@ -31,3 +31,7 @@ class Config(pydantic.BaseModel):
 
     # launchpad secret
     lp_credentials: ops.model.Secret | None = pydantic.Field(default=None)
+
+    # http(s) proxy URL for the services' outbound connections (e.g. to Launchpad).
+    # empty -> fall back to the model's JUJU_CHARM_*_PROXY env; "none" -> no proxy.
+    proxy: str = pydantic.Field(default="")

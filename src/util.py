@@ -85,8 +85,9 @@ def file_ensure_content(
             changed = True
 
     if owner is not None:
-        if file_path.owner() != owner:
-            shutil.chown(file_path, owner)
+        user, _, group = owner.partition(":")
+        if file_path.owner() != user or (group and file_path.group() != group):
+            shutil.chown(file_path, user=user, group=group or None)
             changed = True
 
     if mode is not None and stat.S_IMODE(file_path.stat().st_mode) != mode:

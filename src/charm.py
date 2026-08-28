@@ -44,7 +44,7 @@ from charms.traefik_k8s.v2.ingress import IngressPerAppRequirer
 import config
 from debuginfod import Debuginfod
 from ubuntu_debuginfod import UbuntuDebuginfod
-from util import file_copy, file_link, file_remove, run_check, run_ret
+from util import file_copy, file_ensure_content, file_link, file_remove, run_check, run_ret
 
 # Log messages can be retrieved using juju debug-log
 logger = logging.getLogger(__name__)
@@ -115,23 +115,10 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         self._debuginfod = Debuginfod(self._root)
 
     def _load_cfg(self) -> config.Config:
-        expected = set(config.Config.model_fields.keys())
-        given = self.config.keys()
-
-        secret_options: list[str] = []
-        for cfgkey in expected:
-            cfgmeta = self.meta.config.get(cfgkey)
-            if cfgmeta and cfgmeta.type == 'secret':
-                secret_options.append(cfgkey)
-
-        # secret options must be defaulted to None in our config.
-        expected -= set(secret_options)
-
-        if expected - given:
-            self.unit.status = ops.BlockedStatus(f"missing config settings: {expected - given}")
-            raise Exception(f"not all required charm config values set: {expected=}, {given=}")
-
-        # secrets as config parameters are only provided using load_config conveniently.
+        # load_config fills missing options from their pydantic defaults; only
+        # block on options that have no default and aren't supplied.
+        # (a charm upgrade adding a config option must not break existing
+        # deployments where juju doesn't supply the new key yet.)
         return self.load_config(config.Config)
 
     def _on_debugsyms_storage_attached(self, event: ops.StorageAttachedEvent):
@@ -160,6 +147,14 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             return
         logger.info("charm config changed...")
 
+        # config-changed can fire before install; the packages and their
+        # systemd units don't exist yet, so configuration would fail.
+        # start (emitted after install) applies the full configuration.
+        if not self._ubuntu_debuginfod.installed():
+            logger.info("install not finished yet, deferring configuration to start.")
+            self.unit.status = ops.WaitingStatus("waiting for install")
+            return
+
         self._configure(cfg)
 
     def _configure(self, cfg: config.Config) -> None:
@@ -168,9 +163,16 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         # Configure nginx if reverse proxy is enabled
         self._configure_nginx(cfg.use_reverse_proxy)
 
+        # Proxy drop-ins for the managed systemd units (outbound Launchpad access).
+        self._configure_proxy(cfg)
+
         # Ingress is initialized in __init__ from current config.
         # Refresh ingress requirements immediately when config changes.
         ingress_port = self._setup_ingress(cfg)
+
+        if self._needs_lp_credentials(cfg):
+            self.unit.status = ops.BlockedStatus("missing config: lp_credentials secret")
+            return
 
         self._ubuntu_debuginfod.configure(self.unit, cfg)
         self._debuginfod.configure(self.unit, cfg)
@@ -201,6 +203,11 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         """Update unit status with ingress information."""
         if self._ingress:
             logger.info(f"charm ingress url value: {self._ingress.url}")
+
+    @staticmethod
+    def _needs_lp_credentials(cfg: config.Config) -> bool:
+        # the service config hardcodes private PPAs, which require launchpad auth.
+        return not cfg.testmode and cfg.lp_credentials is None
 
     def _on_start(self, event: ops.StartEvent):
         self._start()
@@ -237,6 +244,10 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
 
     def _configure_nginx(self, use_reverse_proxy: bool):
         """Install and configure nginx reverse proxy."""
+        if not self._ubuntu_debuginfod.installed():
+            logger.info("install not finished yet, skipping nginx setup.")
+            return
+
         if not use_reverse_proxy:
             logger.info("disabling nginx reverse proxy...")
             # nginx may not be installed yet; avoid failing the hook in that case.
@@ -260,6 +271,49 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             logger.info("nginx config changed, restarting...")
             run_check("systemctl restart nginx")
 
+    def _proxy_url(self, cfg: config.Config) -> str | None:
+        """Resolve the effective proxy URL, or None for no proxy."""
+        if cfg.proxy == "none":
+            return None
+        if cfg.proxy:
+            return cfg.proxy
+        return os.environ.get("JUJU_CHARM_HTTPS_PROXY") or os.environ.get("JUJU_CHARM_HTTP_PROXY") or None
+
+    def _configure_proxy(self, cfg: config.Config):
+        """Write/remove the proxy systemd drop-in for the managed services.
+
+        The services run outside the hook context and don't see the model's
+        proxy env; without a proxy on a no-direct-egress machine they hang.
+        A drop-in is the right place since a proxy is a deployment concern,
+        not a property of the packaged software.
+        """
+        url = self._proxy_url(cfg)
+        services = (
+            "debuginfod.service",
+            "ubuntu-debuginfod-launchpad-poller.service",
+            "ubuntu-debuginfod-launchpad-downloader.service",
+            "ubuntu-debuginfod-launchpad-downloader@.service",
+            "ubuntu-debuginfod-launchpad-cleaner.service",
+        )
+        changed = False
+        for service in services:
+            dropin = self._root / f"etc/systemd/system/{service}.d/proxy.conf"
+            if url is None:
+                changed |= file_remove(dropin)
+                continue
+            no_proxy = os.environ.get("JUJU_CHARM_NO_PROXY", "")
+            lines = [
+                "[Service]",
+                f'Environment="HTTP_PROXY={url}"',
+                f'Environment="HTTPS_PROXY={url}"',
+            ]
+            if no_proxy:
+                lines.append(f'Environment="NO_PROXY={no_proxy}"')
+            changed |= file_ensure_content(dropin, content="\n".join(lines) + "\n")
+
+        if changed:
+            run_check("systemctl daemon-reload")
+
     def _setup_ingress(self, cfg: config.Config) -> int:
         logger.info("setting up ingress relation parameters...")
         ingress_port = 80 if cfg.use_reverse_proxy else debuginfod_port
@@ -269,8 +323,15 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
     def _start(self) -> None:
         cfg = self._load_cfg()
         logger.info("starting charm...")
+        if self._needs_lp_credentials(cfg):
+            self.unit.status = ops.BlockedStatus("missing config: lp_credentials secret")
+            return
+
         self.unit.status = ops.WaitingStatus("starting services...")
-        self._ubuntu_debuginfod.restart(self.unit, cfg)
+        # config-changed may have been skipped before install finished;
+        # apply the full configuration now. ubuntu-debuginfod.configure restarts
+        # as needed; debuginfod.configure is a no-op, so start it explicitly.
+        self._configure(cfg)
         self._debuginfod.restart(cfg)
         self.unit.status = ops.ActiveStatus()
         self._check_status()
@@ -286,6 +347,10 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
     def _check_status(self):
         cfg = self._load_cfg()
 
+        if self._needs_lp_credentials(cfg):
+            self.unit.status = ops.BlockedStatus("missing config: lp_credentials secret")
+            return
+
         # check if launchpad processing is running
         if not cfg.testmode and not self._ubuntu_debuginfod.is_running(cfg):
             self.unit.status = ops.BlockedStatus("ubuntu-debuginfod not running")
@@ -295,7 +360,8 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             self.unit.status = ops.BlockedStatus("debuginfod not running")
             return
 
-        self.unit.status = ops.ActiveStatus()
+        polling = "polling launchpad" if cfg.update_ddeb else "polling disabled (update_ddeb=false)"
+        self.unit.status = ops.ActiveStatus(f"serving debug symbols; {polling}")
 
 
 if __name__ == "__main__":  # pragma: nocover

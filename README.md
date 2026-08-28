@@ -22,6 +22,9 @@ When the [Charm](https://juju.is/charms-architecture) is installed, it:
 
 Set `downloader_workers` to the number of parallel download workers to run on each unit (default: `1`).
 
+By default the `ubuntu-debuginfod` packages are installed from the PPA.
+To deploy a locally built snapshot instead, set `package_source=resource` and supply the two deb resources `ubuntu-debuginfod-deb` and `python3-ubuntu-debuginfod-deb` at deploy/refresh time (or later via `juju attach-resource`), see [contributing](doc/contributing.md).
+
 ## Other resources
 
 - [documentation](doc/README.md)

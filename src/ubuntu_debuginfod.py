@@ -154,6 +154,14 @@ class UbuntuDebuginfod:
 
         unit.status = ops.ActiveStatus("Ready")
 
+    def installed(self) -> bool:
+        """Whether the ubuntu-debuginfod package (and its systemd units) exist.
+
+        config-changed can fire before install completes; configuring then would
+        fail on the not-yet-present systemd units.
+        """
+        return run_ret("systemctl cat ubuntu-debuginfod-launchpad-poller.service") == 0
+
     def configure(self, unit: Unit, config: Config) -> None:
         """
         ubuntu-debuginfod setup configuration.
@@ -169,17 +177,23 @@ class UbuntuDebuginfod:
         else:
             try:
                 secrets = lp_creds_secret.get_content(refresh=True)
-                lp_creds = secrets["cred"]  # secret key name as set in `juju add-secret`
-                changed |= file_ensure_content(
-                    lp_creds_path,
-                    content=lp_creds,
-                    mkdir=True,
-                    owner="mirror",
-                    mode=0o600,
-                )
+            except Exception:
+                logger.exception("failed to read lp_credentials secret")
+                raise
 
-            except ops.SecretNotFoundError:
-                logger.info("launchpad secret not set yet.")
+            try:
+                lp_creds = secrets["cred"]  # secret key name as set in `juju add-secret`
+            except KeyError:
+                logger.error(f"lp_credentials secret has no 'cred' key, has: {sorted(secrets)}")
+                raise
+
+            changed |= file_ensure_content(
+                lp_creds_path,
+                content=lp_creds,
+                mkdir=True,
+                owner="mirror:mirror",
+                mode=0o600,
+            )
 
         changed |= file_ensure_content(
             self.root_path / "home/mirror/.config/ubuntu-debuginfod/config.toml",

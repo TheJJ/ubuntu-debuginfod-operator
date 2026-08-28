@@ -158,7 +158,9 @@ def test_configure_writes_toml_and_stops_services_in_testmode(
     for service in stopped_services:
         assert fake_process.call_count(["systemctl", "disable", "--now", service]) == 1
 
+@patch("shutil.chown")
 def test_start_success(
+    mock_chown,
     fake_process,  # fixture from pytest-process
     ctx,
     tmp_path,
@@ -166,7 +168,12 @@ def test_start_success(
     """
     Test successful start.
     """
-    state = State(leader=True, config = {"update_ddeb": True})
+    secret = Secret({"cred": "x"})  # lp_credentials; required for active status
+    state = State(
+        leader=True,
+        config={"update_ddeb": True, "lp_credentials": secret.id},
+        secrets=[secret],
+    )
 
     downloader_units_command = [
         "systemctl",
@@ -186,7 +193,7 @@ def test_start_success(
     # custom env var to signal testing environment basedir
     os.environ["JUJU_CHARM_PREFIX"] = str(tmp_path)
 
-    # run juju install hook
+    # run juju start hook
     out = ctx.run(ctx.on.start(), state)
 
     assert isinstance(out.unit_status, ActiveStatus)
@@ -203,6 +210,21 @@ def test_start_success(
     ]
     for pkg in started_services:
         assert fake_process.call_count(["systemctl", "restart", fake_process.any(), pkg]) == 1
+
+
+def test_start_blocked_without_lp_credentials(fake_process, ctx, tmp_path):
+    """Start without lp_credentials must not touch services and report blocked."""
+    fake_process.register([fake_process.any()])
+    fake_process.keep_last_process(True)
+
+    os.environ["JUJU_CHARM_PREFIX"] = str(tmp_path)
+
+    state = State(leader=True, config={"update_ddeb": True})
+    out = ctx.run(ctx.on.start(), state)
+
+    assert isinstance(out.unit_status, BlockedStatus)
+    assert "lp_credentials" in out.unit_status.message
+    assert fake_process.call_count(["systemctl", "restart", fake_process.any()]) == 0
 
 
 def test_restart_reconciles_downloader_workers(fake_process):
@@ -435,4 +457,4 @@ def test_chown_is_called_when_owner_differs(mock_owner, mock_chown, tmp_path):
 
     file_ensure_content(file, "content", owner="new_owner")
 
-    mock_chown.assert_called_once_with(file, "new_owner")
+    mock_chown.assert_called_once_with(file, user="new_owner", group=None)
