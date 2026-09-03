@@ -46,7 +46,7 @@ It stores PPA configuration in `/home/mirror/.config/ubuntu-debuginfod/config.to
 Set `downloader_workers` to control how many parallel download workers run on the unit; it defaults to `1`.
 Worker counts are currently configured independently per unit rather than coordinated across an application.
 
-To activate the archive synchronization, set option `update_ddeb=true`.
+To activate the archive synchronization, set option `sync_launchpad=true`.
 
 ## Contributing
 

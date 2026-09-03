@@ -14,8 +14,11 @@ class Config(pydantic.BaseModel):
     # ops.model.Secret is not pydantic-compatible, so we can't actually nest it.
     model_config = pydantic.ConfigDict(arbitrary_types_allowed=True)
 
-    # activate ddeb fetching
-    update_ddeb: bool = pydantic.Field()
+    # poll launchpad for new debug ddebs and enqueue downloads
+    sync_launchpad: bool = pydantic.Field()
+
+    # run the downloader workers processing the download queue
+    download: bool = pydantic.Field(default=True)
 
     # parallel downloader processes on this unit
     downloader_workers: int = pydantic.Field(default=1, ge=1)

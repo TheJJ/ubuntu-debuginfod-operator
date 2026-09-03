@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import ops
 
-from util import file_ensure_content, file_remove, run_check, run_out, run_ret
+from util import file_ensure_content, file_link, file_remove, run_check, run_out, run_ret
 
 if TYPE_CHECKING:
     from ops.model import Unit
@@ -51,6 +51,9 @@ user = "ubuntu-advantage"
 name = "realtime-updates"
 private = true
 """
+
+POSTGRES_DATA_DIR = "var/lib/postgresql"
+DEBUGDB_STORAGE_DIR = "srv/debug-db"
 
 DOWNLOADER_SERVICE = "ubuntu-debuginfod-launchpad-downloader.service"
 DOWNLOADER_SERVICE_TEMPLATE = "ubuntu-debuginfod-launchpad-downloader@{worker}.service"
@@ -109,6 +112,49 @@ class UbuntuDebuginfod:
         if not database_exists:
             run_check("runuser -u postgres -- createdb --owner mirror ubuntu-debuginfod")
 
+    def relocate_postgres_storage(self) -> None:
+        """Move the postgres cluster onto the debugdb storage volume.
+
+        The job database grows with the archive backfill and must not fill the
+        small root disk. /var/lib/postgresql/<version>/main becomes a symlink
+        to the volume, so postgres packaging (which assumes the conventional
+        data_directory path) keeps working unmodified.
+        """
+        storage = self.root_path / DEBUGDB_STORAGE_DIR
+        if run_ret(f"findmnt --mountpoint {shlex.quote(str(storage))}") != 0:
+            logger.info("debugdb storage not attached; keeping postgres on the root disk.")
+            return
+
+        src_root = self.root_path / POSTGRES_DATA_DIR
+        if not src_root.is_dir():
+            # postgres not installed yet; install() relocates after apt-get.
+            return
+
+        clusters = [cluster for cluster in sorted(src_root.glob("*/main")) if not cluster.is_symlink()]
+        if not clusters:
+            return
+
+        was_active = run_ret("systemctl is-active postgresql.service") == 0
+        if was_active:
+            run_check("systemctl stop postgresql.service")
+
+        for cluster in clusters:
+            # <version>/main directly on the volume, so a future postgres major
+            # upgrade creates its cluster as a sibling (pg_upgradecluster).
+            dst = storage / cluster.parent.name / cluster.name
+            dst.mkdir(parents=True, exist_ok=True)
+            run_check(f"rsync -aHAX {shlex.quote(str(cluster))}/ {shlex.quote(str(dst))}/")
+            backup = cluster.with_name(cluster.name + ".pre-relocate")
+            shutil.move(cluster, backup)
+            file_link(dst, cluster)
+            shutil.rmtree(backup)
+            # postgres refuses to start when the data dir is group/world-accessible.
+            shutil.chown(dst.parent, user="postgres", group="postgres")
+            shutil.chown(dst, user="postgres", group="postgres")
+
+        if was_active:
+            run_check("systemctl start postgresql.service")
+
     @staticmethod
     def _downloader_services(config: Config) -> set[str]:
         return {
@@ -137,13 +183,14 @@ class UbuntuDebuginfod:
             run_check("add-apt-repository -y ppa:ubuntu-debuginfod-devs/ubuntu-debuginfod")
 
         unit.status = ops.MaintenanceStatus("Installing PostgreSQL...")
-        run_check("apt install -y postgresql")
+        run_check("apt-get install -y postgresql")
+        self.relocate_postgres_storage()
         run_check("systemctl enable --now postgresql.service")
 
         unit.status = ops.MaintenanceStatus("Installing ubuntu-debuginfod...")
         # no recommends, since we don't need toolchain/build-essentials (actually just dpkg-source)
         packages = [str(path) for path in package_resources] if package_resources else ["ubuntu-debuginfod"]
-        run_check(shlex.join(["apt", "install", "-y", "--no-install-recommends", *packages]))
+        run_check(shlex.join(["apt-get", "install", "-y", "--no-install-recommends", *packages]))
         # this creates the mirror:mirror user.
         # this also installs configs for:
         # /etc/default/ubuntu-debuginfod-launchpad-downloader
@@ -162,11 +209,11 @@ class UbuntuDebuginfod:
         """
         return run_ret("systemctl cat ubuntu-debuginfod-launchpad-poller.service") == 0
 
-    def configure(self, unit: Unit, config: Config) -> None:
+    def configure(self, unit: Unit, config: Config, force_restart: bool = False) -> None:
         """
         ubuntu-debuginfod setup configuration.
         """
-        changed = False
+        changed = force_restart
 
         # Deploy the launchpad access credentials secret file.
         lp_creds_path = self.root_path / "home/mirror/.config/ubuntu-debuginfod/lp.cred"
@@ -208,11 +255,11 @@ class UbuntuDebuginfod:
 
         poller_enabled = 0 == run_ret("systemctl is-enabled ubuntu-debuginfod-launchpad-poller.service")
         services_running = self.is_running(config)
-        if not changed and poller_enabled == config.update_ddeb and services_running:
+        if not changed and poller_enabled == config.sync_launchpad and services_running:
             return
 
         self.restart(unit, config)
-        if not config.update_ddeb and poller_enabled:
+        if not config.sync_launchpad and poller_enabled:
             run_check("systemctl disable --now ubuntu-debuginfod-launchpad-poller.service")
 
     def restart(self, unit: Unit, config: Config) -> None:
@@ -227,10 +274,10 @@ class UbuntuDebuginfod:
             return
 
         # The downloader processes jobs produced by the poller.
-        desired_downloaders = self._downloader_services(config)
+        desired_downloaders = self._downloader_services(config) if config.download else set()
         for service in sorted(self._enabled_downloader_services() - desired_downloaders):
             run_check(f"systemctl disable --now {service}")
-        run_check(f"systemctl disable --now {DOWNLOADER_SERVICE}")
+        run_ret(f"systemctl disable --now {DOWNLOADER_SERVICE}")
         for service in sorted(desired_downloaders):
             run_check(f"systemctl enable {service}")
             run_check(f"systemctl restart {service}")
@@ -239,8 +286,8 @@ class UbuntuDebuginfod:
         run_check("systemctl restart ubuntu-debuginfod-launchpad-cleaner.timer")
         run_check("systemctl restart ubuntu-debuginfod-launchpad-cleaner.service")
 
-        if not config.update_ddeb:
-            # no updating of debug files, but we do process the pending queue.
+        if not config.sync_launchpad:
+            # no polling of launchpad, but we do process the pending queue.
             return
 
         # The poller continuously asks Launchpad for updates.
@@ -261,6 +308,8 @@ class UbuntuDebuginfod:
             return False
         if run_ret("systemctl is-active ubuntu-debuginfod-launchpad-cleaner.timer") != 0:
             return False
-        return not config.update_ddeb or run_ret(
+        if not config.download:
+            return True
+        return not config.sync_launchpad or run_ret(
             "systemctl is-active ubuntu-debuginfod-launchpad-poller.service"
         ) == 0

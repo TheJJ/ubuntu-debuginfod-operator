@@ -37,7 +37,7 @@ class Debuginfod:
     def install(self, unit: Unit) -> None:
         unit.status = ops.MaintenanceStatus("Installing debuginfod...")
 
-        run_check("apt install -y debuginfod")
+        run_check("apt-get install -y debuginfod")
 
         unit.status = ops.MaintenanceStatus("Setting up debuginfod...")
 

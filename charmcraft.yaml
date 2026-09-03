@@ -50,6 +50,8 @@ storage:
     type: filesystem
     #minimum-size: 20T ?
     location: /srv/debug-mirror/
+    multiple:
+      range: 0-1
 
   # debuginfod's internal sqlite database, ~400GiB (at 25.04)
   debuginfoddb:
@@ -57,6 +59,19 @@ storage:
     type: filesystem
     #minimum-size: 600G ?
     location: /var/cache/private/debuginfod/
+    multiple:
+      range: 0-1
+
+  # the postgres job-database (download queue, artifacts, backfill ranges)
+  debugdb:
+    description: postgres job-database storage
+    type: filesystem
+    #minimum-size: 600G ?
+    location: /srv/debug-db/
+    # 0-1: allow detaching/removing the instance so it can be re-provisioned
+    # from a different pool (e.g. rootfs -> cinder-nvme) without redeploying.
+    multiple:
+      range: 0-1
 
 requires:
   # debuginfod gets requests via http
@@ -74,10 +89,14 @@ links:
 # https://juju.is/docs/sdk/charmcraft-yaml#heading--config
 config:
   options:
-    update_ddeb:
+    sync_launchpad:
       type: boolean
-      description: "perform periodic debug data updates by polling launchpad"
+      description: "poll launchpad for new debug ddebs and enqueue their download"
       default: false
+    download:
+      type: boolean
+      description: "run the downloader workers processing the download queue"
+      default: true
     downloader_workers:
       type: int
       description: "number of parallel Launchpad downloader workers to run on each unit"

@@ -4,6 +4,7 @@
 # Learn more about testing at: https://juju.is/docs/sdk/testing
 
 import os
+import shutil
 import stat
 from pathlib import Path
 from unittest.mock import patch
@@ -55,11 +56,11 @@ def test_install_success(
         "ubuntu-debuginfod",
     ]
     for pkg in installed_packages:
-        assert fake_process.call_count(["apt", "install", "-y", fake_process.any(), pkg]) == 1
+        assert fake_process.call_count(["apt-get", "install", "-y", fake_process.any(), pkg]) == 1
 
     assert fake_process.call_count(["add-apt-repository", "-y",
                                     fake_process.any(), "ppa:ubuntu-debuginfod-devs/ubuntu-debuginfod"]) == 1
-    assert fake_process.call_count(["apt", "install", "-y", "postgresql"]) == 1
+    assert fake_process.call_count(["apt-get", "install", "-y", "postgresql"]) == 1
     assert fake_process.call_count(["systemctl", "enable", "--now", "postgresql.service"]) == 1
     assert fake_process.call_count(["runuser", "-u", "postgres", "--", "createuser", "--login", "mirror"]) == 1
     assert fake_process.call_count(
@@ -95,7 +96,7 @@ def test_install_from_package_resources(mock_os_chown, fake_process, ctx, tmp_pa
     ) == 0
     assert fake_process.call_count(
         [
-            "apt",
+            "apt-get",
             "install",
             "-y",
             "--no-install-recommends",
@@ -137,7 +138,7 @@ def test_configure_writes_toml_and_stops_services_in_testmode(
 
     UbuntuDebuginfod(tmp_path).configure(
         unit=None,
-        config=Config(update_ddeb=True, testmode=True, use_reverse_proxy=False),
+        config=Config(sync_launchpad=True, testmode=True, use_reverse_proxy=False),
     )
 
     config_toml = (config_dir / "config.toml").read_text()
@@ -171,7 +172,7 @@ def test_start_success(
     secret = Secret({"cred": "x"})  # lp_credentials; required for active status
     state = State(
         leader=True,
-        config={"update_ddeb": True, "lp_credentials": secret.id},
+        config={"sync_launchpad": True, "lp_credentials": secret.id},
         secrets=[secret],
     )
 
@@ -219,12 +220,69 @@ def test_start_blocked_without_lp_credentials(fake_process, ctx, tmp_path):
 
     os.environ["JUJU_CHARM_PREFIX"] = str(tmp_path)
 
-    state = State(leader=True, config={"update_ddeb": True})
+    state = State(leader=True, config={"sync_launchpad": True})
     out = ctx.run(ctx.on.start(), state)
 
     assert isinstance(out.unit_status, BlockedStatus)
     assert "lp_credentials" in out.unit_status.message
     assert fake_process.call_count(["systemctl", "restart", fake_process.any()]) == 0
+
+
+@patch("shutil.chown")
+def test_relocate_postgres_storage_moves_cluster(mock_chown, fake_process, tmp_path):
+    storage = tmp_path / "srv/debug-db"
+    cluster = tmp_path / "var/lib/postgresql/18/main"
+    cluster.mkdir(parents=True)
+    (cluster / "PG_VERSION").write_text("18\n")
+
+    fake_process.register(["findmnt", "--mountpoint", str(storage)], returncode=0)
+    fake_process.register(["systemctl", "is-active", "postgresql.service"], returncode=0)
+    fake_process.register(["systemctl", "stop", "postgresql.service"])
+
+    def fake_rsync(cmd, *args, **kwargs):
+        shutil.copytree(cluster, storage / "18/main", dirs_exist_ok=True)
+        return 0
+
+    fake_process.register(
+        ["rsync", "-aHAX", f"{cluster}/", f"{storage}/18/main/"],
+        callback=fake_rsync,
+    )
+    fake_process.register(["systemctl", "start", "postgresql.service"])
+    fake_process.keep_last_process(True)
+
+    UbuntuDebuginfod(tmp_path).relocate_postgres_storage()
+
+    dst = storage / "18/main"
+    assert cluster.is_symlink()
+    assert cluster.resolve() == dst.resolve()
+    assert (dst / "PG_VERSION").read_text() == "18\n"
+    assert fake_process.call_count(["systemctl", "stop", "postgresql.service"]) == 1
+    assert fake_process.call_count(["systemctl", "start", "postgresql.service"]) == 1
+    mock_chown.assert_any_call(dst.parent, user="postgres", group="postgres")
+    mock_chown.assert_any_call(dst, user="postgres", group="postgres")
+
+    # idempotent: a second run must not touch anything
+    stop_count = fake_process.call_count(["systemctl", "stop", "postgresql.service"])
+    rsync_count = fake_process.call_count(["rsync", "-aHAX", fake_process.any()])
+    UbuntuDebuginfod(tmp_path).relocate_postgres_storage()
+    assert fake_process.call_count(["systemctl", "stop", "postgresql.service"]) == stop_count
+    assert fake_process.call_count(["rsync", "-aHAX", fake_process.any()]) == rsync_count
+
+
+def test_relocate_postgres_storage_skips_without_mount(fake_process, tmp_path):
+    cluster = tmp_path / "var/lib/postgresql/18/main"
+    cluster.mkdir(parents=True)
+
+    fake_process.register(
+        ["findmnt", "--mountpoint", str(tmp_path / "srv/debug-db")],
+        returncode=1,
+    )
+    fake_process.keep_last_process(True)
+
+    UbuntuDebuginfod(tmp_path).relocate_postgres_storage()
+
+    assert not cluster.is_symlink()
+    assert fake_process.call_count(["rsync", "-aHAX", fake_process.any()]) == 0
 
 
 def test_restart_reconciles_downloader_workers(fake_process):
@@ -246,7 +304,7 @@ def test_restart_reconciles_downloader_workers(fake_process):
     fake_process.register([fake_process.any()])
     fake_process.keep_last_process(True)
     config = Config(
-        update_ddeb=False,
+        sync_launchpad=False,
         downloader_workers=2,
         testmode=False,
         use_reverse_proxy=False,
@@ -321,7 +379,7 @@ def test_stop_success(
     os.environ["JUJU_CHARM_PREFIX"] = str(tmp_path)
 
     # run juju install hook
-    state = State(leader=True, config = {"update_ddeb": True})
+    state = State(leader=True, config = {"sync_launchpad": True})
     out = ctx.run(ctx.on.stop(), state)
 
     assert isinstance(out.unit_status, BlockedStatus)

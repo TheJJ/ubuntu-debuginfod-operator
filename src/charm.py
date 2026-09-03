@@ -101,6 +101,8 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         framework.observe(self.on.debugsyms_storage_attached, self._on_debugsyms_storage_attached)
         framework.observe(self.on.debuginfoddb_storage_attached,
                           self._on_debuginfoddb_storage_attached)
+        framework.observe(self.on.debugdb_storage_attached,
+                          self._on_debugdb_storage_attached)
 
         # triggers when the ingress url changes
         framework.observe(self._ingress.on.ready, self._on_ingress_ready)
@@ -127,6 +129,10 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
 
     def _on_debuginfoddb_storage_attached(self, event: ops.StorageAttachedEvent):
         self._debuginfod.storage_meta_attached(self.unit)
+
+    def _on_debugdb_storage_attached(self, event: ops.StorageAttachedEvent):
+        # storage may attach after install; move the cluster now that it exists.
+        self._ubuntu_debuginfod.relocate_postgres_storage()
 
     def _on_install(self, event: ops.InstallEvent):
         self._install(self._load_cfg())
@@ -165,6 +171,7 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
 
         # Proxy drop-ins for the managed systemd units (outbound Launchpad access).
         self._configure_proxy(cfg)
+        tmpdir_changed = self._configure_tmpdir()
 
         # Ingress is initialized in __init__ from current config.
         # Refresh ingress requirements immediately when config changes.
@@ -174,7 +181,8 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             self.unit.status = ops.BlockedStatus("missing config: lp_credentials secret")
             return
 
-        self._ubuntu_debuginfod.configure(self.unit, cfg)
+        # a TMPDIR drop-in change needs a worker restart to take effect.
+        self._ubuntu_debuginfod.configure(self.unit, cfg, force_restart=tmpdir_changed)
         self._debuginfod.configure(self.unit, cfg)
 
         # Open exactly one externally exposed port based on mode.
@@ -228,7 +236,7 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
     def _install(self, cfg: config.Config):
         logger.info("installing charm...")
         # ensure automatic system security upgrades
-        run_check("apt install -y needrestart unattended-upgrades")
+        run_check("apt-get install -y needrestart unattended-upgrades")
         run_check("dpkg-reconfigure unattended-upgrades")
 
         # nginx will be installed/configured if needed by _configure_nginx() in config-changed
@@ -255,7 +263,7 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             return
 
         logger.info("configuring nginx reverse proxy...")
-        run_check("apt install -y nginx-light")
+        run_check("apt-get install -y nginx-light")
         changed = file_copy(
             basedir / "etc/nginx-site-debuginfod.conf",
             self._root / "etc/nginx/sites-available/debuginfod.conf",
@@ -314,6 +322,45 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
         if changed:
             run_check("systemctl daemon-reload")
 
+    def _configure_tmpdir(self) -> bool:
+        """Write the TMPDIR drop-in for the downloader workers.
+
+        Downloads stage in tempfile.NamedTemporaryFile, which defaults to /tmp
+        (a small tmpfs); multi-hundred-MB ddebs fill it and take down apt and
+        the juju agent with it. Stage on the debugsyms volume instead.
+
+        Returns whether the drop-in changed, so callers can restart the workers
+        (a running process never re-reads its environment).
+        """
+        tmpdir = self._root / "srv/debug-mirror/tmpdir"
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        # debuginfod (DynamicUser) extracts archives via TMPDIR too; it cannot
+        # write the mirror-owned downloader staging dir, so it gets its own.
+        debuginfod_tmpdir = self._root / "srv/debug-mirror/debuginfod-tmp"
+        debuginfod_tmpdir.mkdir(parents=True, exist_ok=True)
+        debuginfod_tmpdir.chmod(0o1777)
+        # reap staging corpses from killed workers; a download in flight is
+        # never older than this, so only orphans match.
+        changed = file_ensure_content(
+            self._root / "etc/tmpfiles.d/ubuntu-debuginfod.conf",
+            content=f"d {tmpdir} 0755 mirror mirror 1d\n"
+            f"e {tmpdir} 0755 mirror mirror 1d\n"
+            f"d {debuginfod_tmpdir} 1777 - - 1d\n"
+            f"e {debuginfod_tmpdir} 1777 - - 1d\n",
+        )
+        run_ret("systemd-tmpfiles --create --remove ubuntu-debuginfod.conf")
+        for service in (
+            "ubuntu-debuginfod-launchpad-downloader.service",
+            "ubuntu-debuginfod-launchpad-downloader@.service",
+        ):
+            changed |= file_ensure_content(
+                self._root / f"etc/systemd/system/{service}.d/tmpdir.conf",
+                content=f'[Service]\nEnvironment="TMPDIR={tmpdir}"\n',
+            )
+        if changed:
+            run_check("systemctl daemon-reload")
+        return changed
+
     def _setup_ingress(self, cfg: config.Config) -> int:
         logger.info("setting up ingress relation parameters...")
         ingress_port = 80 if cfg.use_reverse_proxy else debuginfod_port
@@ -360,8 +407,12 @@ class UbuntuDebuginfodCharm(ops.CharmBase):
             self.unit.status = ops.BlockedStatus("debuginfod not running")
             return
 
-        polling = "polling launchpad" if cfg.update_ddeb else "polling disabled (update_ddeb=false)"
-        self.unit.status = ops.ActiveStatus(f"serving debug symbols; {polling}")
+        polling = "polling launchpad" if cfg.sync_launchpad else "polling disabled"
+        if cfg.download:
+            downloading = f"downloading with {cfg.downloader_workers} worker(s)"
+        else:
+            downloading = "downloading disabled"
+        self.unit.status = ops.ActiveStatus(f"serving debug symbols; {polling}; {downloading}")
 
 
 if __name__ == "__main__":  # pragma: nocover
